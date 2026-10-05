@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Notebook</title>
+<style>
+  :root { --bg: #1e1f22; --card: #2b2d31; --fg: #e6e6e6; --muted: #9aa0a6; --accent: #5b9cf6; --error: #f28b82; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px system-ui, sans-serif; }
+  body { display: flex; align-items: center; justify-content: center; padding: 16px; }
+  form { width: 100%; max-width: 320px; background: var(--card); padding: 24px; border-radius: 12px; display: flex; flex-direction: column; gap: 12px; }
+  h1 { margin: 0 0 4px; font-size: 18px; font-weight: 600; }
+  input { background: var(--bg); color: var(--fg); border: 1px solid #ffffff22; border-radius: 8px; padding: 10px 12px; font-size: 15px; outline: none; }
+  input:focus { border-color: var(--accent); }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 10px; font-size: 15px; cursor: pointer; }
+  .error { color: var(--error); min-height: 1em; margin: 0; font-size: 13px; }
+</style>
+</head>
+<body>
+<form method="post" action="/login" autocomplete="off">
+  <h1>Notebook</h1>
+  <input type="password" name="password" placeholder="Password" autocomplete="off" autofocus required>
+  <button type="submit">Sign in</button>
+  <p class="error">{{ERROR}}</p>
+</form>
+</body>
+</html>
