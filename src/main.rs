@@ -16,6 +16,7 @@ use chromiumoxide::cdp::browser_protocol::input::{
     DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams, DispatchMouseEventType,
     InsertTextParams,
 };
+use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
 use chromiumoxide::cdp::browser_protocol::page::{NavigateParams, ReloadParams};
 use chrono::Timelike;
 use futures::{SinkExt, StreamExt};
@@ -44,6 +45,23 @@ struct Bookmark {
     url: String,
 }
 
+/// The client's canvas size in screen pixels and its zoom level.
+#[derive(Clone, Copy)]
+pub struct Viewport {
+    w: i64,
+    h: i64,
+    zoom: f64,
+}
+
+impl Viewport {
+    /// Zoom works like Chrome's page zoom: a smaller CSS viewport rendered at a
+    /// higher scale factor, so frames still match the canvas pixel for pixel.
+    pub fn metrics(&self) -> SetDeviceMetricsOverrideParams {
+        let css = |px: i64| (px as f64 / self.zoom).round() as i64;
+        SetDeviceMetricsOverrideParams::new(css(self.w), css(self.h), self.zoom, false)
+    }
+}
+
 #[derive(Default)]
 struct Ui {
     tabs: Vec<Tab>,
@@ -62,7 +80,7 @@ pub struct App {
     ui: Mutex<Ui>,
     clients: AtomicUsize,
     last_seen: Mutex<Instant>,
-    viewport: Mutex<(i64, i64)>,
+    viewport: Mutex<Viewport>,
     conn_gen: watch::Sender<u64>,
 }
 
@@ -198,7 +216,7 @@ async fn main() {
         ui: Mutex::new(Ui { bookmarks, ..Default::default() }),
         clients: AtomicUsize::new(0),
         last_seen: Mutex::new(Instant::now()),
-        viewport: Mutex::new((1280, 800)),
+        viewport: Mutex::new(Viewport { w: 1280, h: 800, zoom: 1.0 }),
         conn_gen: watch::Sender::new(0),
     });
     app.publish_ui();
@@ -407,7 +425,7 @@ async fn client(app: Arc<App>, socket: WebSocket) {
 #[derive(Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 enum Cmd {
-    Size { w: i64, h: i64 },
+    Size { w: i64, h: i64, zoom: Option<f64> },
     Mouse { p: DispatchMouseEventParams },
     Key { p: DispatchKeyEventParams },
     Text { text: String },
@@ -473,11 +491,15 @@ fn encode_query(s: &str) -> String {
 
 async fn handle(app: &Arc<App>, cmd: Cmd) {
     match cmd {
-        Cmd::Size { w, h } => {
-            let (w, h) = (w.clamp(200, 3840), h.clamp(200, 2160));
-            *app.viewport.lock().unwrap() = (w, h);
+        Cmd::Size { w, h, zoom } => {
+            let viewport = Viewport {
+                w: w.clamp(200, 3840),
+                h: h.clamp(200, 2160),
+                zoom: zoom.unwrap_or(1.0).clamp(0.25, 5.0),
+            };
+            *app.viewport.lock().unwrap() = viewport;
             if let Some(chrome) = app.chrome.lock().await.as_ref() {
-                chrome.resize(w, h).await;
+                chrome.resize(viewport).await;
             }
         }
         Cmd::Mouse { p } => {

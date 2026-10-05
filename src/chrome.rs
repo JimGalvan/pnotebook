@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use base64::Engine;
 use bytes::Bytes;
-use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
 use chromiumoxide::cdp::browser_protocol::page::{
     EventScreencastFrame, ScreencastFrameAckParams, StartScreencastFormat, StartScreencastParams,
     StopScreencastParams,
@@ -15,7 +14,7 @@ use futures::StreamExt;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, sleep_until, timeout};
 
-use crate::{App, Tab, data_dir};
+use crate::{App, Tab, Viewport, data_dir};
 
 const CHROME: &str = "/usr/bin/chromium";
 const FRAME_INTERVAL: Duration = Duration::from_millis(33); // ~30 fps cap
@@ -146,10 +145,8 @@ impl Chrome {
         }
         self.stop_cast().await;
         let _ = page.bring_to_front().await;
-        let (w, h) = *app.viewport.lock().unwrap();
-        let _ = page
-            .execute(SetDeviceMetricsOverrideParams::new(w, h, 1.0, false))
-            .await;
+        let metrics = app.viewport.lock().unwrap().metrics();
+        let _ = page.execute(metrics).await;
         let id = page.target_id().as_ref().to_string();
         self.active = Some(page);
         app.set_active(id);
@@ -181,11 +178,9 @@ impl Chrome {
         }
     }
 
-    pub async fn resize(&self, w: i64, h: i64) {
+    pub async fn resize(&self, viewport: Viewport) {
         if let Some(page) = &self.active {
-            let _ = page
-                .execute(SetDeviceMetricsOverrideParams::new(w, h, 1.0, false))
-                .await;
+            let _ = page.execute(viewport.metrics()).await;
         }
     }
 

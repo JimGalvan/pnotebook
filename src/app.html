@@ -29,7 +29,10 @@
   .bm:hover .x { display: inline; }
   .bm-edit { width: 150px; background: var(--bg); color: var(--fg); border: 1px solid var(--accent); border-radius: 6px; padding: 0 4px; font: inherit; outline: none; }
   #view { flex: 1; position: relative; overflow: hidden; background: #fff; }
-  canvas { position: absolute; top: 0; left: 0; outline: none; cursor: default; }
+  canvas { position: absolute; top: 0; left: 0; outline: none; cursor: default; touch-action: none; }
+  #zoom { font-size: 12px; min-width: 46px; padding: 6px 4px; color: var(--muted); }
+  @media (hover: none) { .bm .x { display: inline; } }
+  @media (max-width: 600px) { #fwd { display: none; } .tab { width: 140px; } }
   #msg { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 12px; align-items: center; justify-content: center; background: var(--bg); color: var(--muted); font-size: 15px; }
   #msg button { background: var(--accent); color: #fff; font-size: 14px; padding: 8px 14px; }
 </style>
@@ -42,6 +45,9 @@
     <button id="fwd" title="Forward">&#9654;</button>
     <button id="reload" title="Reload">&#10227;</button>
     <input id="url" autocomplete="off" spellcheck="false" placeholder="Search or enter address">
+    <button id="zoomOut" title="Zoom out (Ctrl -)">&minus;</button>
+    <button id="zoom" title="Reset zoom (Ctrl 0)">100%</button>
+    <button id="zoomIn" title="Zoom in (Ctrl +)">+</button>
     <button id="star" title="Bookmark this page">&#9734;</button>
     <form method="post" action="/logout" style="margin:0"><button title="Log out">&#9211;</button></form>
   </div>
@@ -57,6 +63,9 @@ const canvas = $('screen'), ctx = canvas.getContext('2d'), view = $('view'), msg
 let ws, state = { tabs: [], bookmarks: [] }, replaced = false;
 let selected = '';   // text selected in the remote page, kept ready for Ctrl+C
 let editing = null;  // url of the bookmark being renamed
+const ZOOMS = [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200];
+let zoom = 100;
+try { zoom = ZOOMS.includes(+localStorage.getItem('zoom')) ? +localStorage.getItem('zoom') : 100; } catch {}
 
 const send = o => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -100,7 +109,8 @@ async function draw() {
     const buf = pending; pending = null;
     try {
       const bmp = await createImageBitmap(new Blob([buf], { type: 'image/jpeg' }));
-      ctx.drawImage(bmp, 0, 0);
+      // Below 100% zoom Chrome sends frames larger than the canvas; scale to fit.
+      ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
       bmp.close();
       if (msg.style.display !== 'none') status('');
     } catch {}
@@ -112,8 +122,23 @@ let resizeTimer;
 function resize() {
   const w = view.clientWidth, h = view.clientHeight;
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
-  send({ t: 'size', w, h });
+  send({ t: 'size', w, h, zoom: zoom / 100 });
 }
+
+function setZoom(z) {
+  zoom = z;
+  try { localStorage.setItem('zoom', z); } catch {}
+  $('zoom').textContent = z + '%';
+  resize();
+}
+function stepZoom(dir) {
+  const i = ZOOMS.indexOf(zoom);
+  setZoom(ZOOMS[Math.min(ZOOMS.length - 1, Math.max(0, i + dir))]);
+}
+$('zoomOut').onclick = () => stepZoom(-1);
+$('zoomIn').onclick = () => stepZoom(1);
+$('zoom').onclick = () => setZoom(100);
+$('zoom').textContent = zoom + '%';
 new ResizeObserver(() => { clearTimeout(resizeTimer); resizeTimer = setTimeout(resize, 150); }).observe(view);
 
 // Mouse. On a Mac, Cmd is sent as Ctrl since the remote Chrome runs on Linux.
@@ -122,7 +147,10 @@ const mods = e => (e.getModifierState && e.getModifierState('AltGraph')) ? 0 :
   (e.altKey ? 1 : 0) | (e.ctrlKey || (MAC && e.metaKey) ? 2 : 0) | (!MAC && e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
 const BUTTONS = ['left', 'middle', 'right', 'back', 'forward'];
 const held = b => b & 1 ? 'left' : b & 4 ? 'middle' : b & 2 ? 'right' : 'none';
-function pos(e) { const r = canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+function pos(e) {
+  const r = canvas.getBoundingClientRect(), z = zoom / 100;
+  return { x: (e.clientX - r.left) / z, y: (e.clientY - r.top) / z };
+}
 function mouse(type, e, extra) {
   send({ t: 'mouse', p: { type, ...pos(e), modifiers: mods(e), buttons: e.buttons, ...extra } });
 }
@@ -141,19 +169,81 @@ window.addEventListener('mousemove', e => {
   if (!lastMove) requestAnimationFrame(() => { mouse('mouseMoved', lastMove, { button: held(lastMove.buttons) }); lastMove = null; });
   lastMove = e;
 });
+// Scrolling is batched to one wheel event per frame. Deltas are in screen
+// pixels and get converted to page pixels for the current zoom.
 let wheel = null;
-canvas.addEventListener('wheel', e => {
-  e.preventDefault();
-  const k = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? canvas.height : 1;
+function queueWheel(e, dx, dy) {
   if (!wheel) {
     wheel = { e, dx: 0, dy: 0 };
     requestAnimationFrame(() => {
-      mouse('mouseWheel', wheel.e, { deltaX: wheel.dx, deltaY: wheel.dy });
+      const z = zoom / 100;
+      mouse('mouseWheel', wheel.e, { deltaX: wheel.dx / z, deltaY: wheel.dy / z });
       wheel = null;
     });
   }
-  wheel.e = e; wheel.dx += e.deltaX * k; wheel.dy += e.deltaY * k;
+  wheel.e = e; wheel.dx += dx; wheel.dy += dy;
+}
+let pinch = 0;
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  if (e.ctrlKey) {  // Ctrl+wheel and trackpad pinch zoom the page
+    pinch += e.deltaY;
+    if (Math.abs(pinch) >= 40) { stepZoom(pinch < 0 ? 1 : -1); pinch = 0; }
+    return;
+  }
+  const k = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? canvas.height : 1;
+  queueWheel(e, e.deltaX * k, e.deltaY * k);
 }, { passive: false });
+
+// Touch: a one-finger drag scrolls (with momentum when flicked), a tap clicks.
+let touch = null, fling = 0;
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  cancelAnimationFrame(fling);
+  const t = e.touches[0];
+  touch = e.touches.length === 1
+    ? { x0: t.clientX, y0: t.clientY, x: t.clientX, y: t.clientY, last: e.timeStamp, vx: 0, vy: 0, moved: false }
+    : null;
+}, { passive: false });
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (!touch || e.touches.length !== 1) return;
+  const t = e.touches[0];
+  if (!touch.moved && Math.hypot(t.clientX - touch.x0, t.clientY - touch.y0) < 8) return;
+  touch.moved = true;
+  const dx = touch.x - t.clientX, dy = touch.y - t.clientY;
+  const dt = Math.max(1, e.timeStamp - touch.last);
+  touch.vx = dx / dt; touch.vy = dy / dt;
+  touch.x = t.clientX; touch.y = t.clientY; touch.last = e.timeStamp;
+  queueWheel(t, dx, dy);
+}, { passive: false });
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  if (!touch) return;
+  const t = e.changedTouches[0];
+  if (!touch.moved) {
+    canvas.focus();
+    mouse('mouseMoved', t, { button: 'none' });
+    mouse('mousePressed', t, { button: 'left', buttons: 1, clickCount: 1 });
+    mouse('mouseReleased', t, { button: 'left', buttons: 0, clickCount: 1 });
+  } else if (e.timeStamp - touch.last < 80) {
+    flingScroll(t, touch.vx, touch.vy);
+  }
+  touch = null;
+}, { passive: false });
+function flingScroll(t, vx, vy) {
+  const point = { clientX: t.clientX, clientY: t.clientY };
+  let last = performance.now();
+  const step = now => {
+    const dt = now - last; last = now;
+    const decay = Math.pow(0.996, dt);
+    vx *= decay; vy *= decay;
+    if (Math.abs(vx) < 0.02 && Math.abs(vy) < 0.02) return;
+    queueWheel(point, vx * dt, vy * dt);
+    fling = requestAnimationFrame(step);
+  };
+  fling = requestAnimationFrame(step);
+}
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 
 // Keyboard. Ctrl+C/X also put the remote selection on the local clipboard,
@@ -177,6 +267,9 @@ const shortcut = (e, k) => (e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowe
 canvas.addEventListener('keydown', e => {
   if (shortcut(e, 'v')) return;
   e.preventDefault();
+  if (shortcut(e, '=') || shortcut(e, '+')) return stepZoom(1);
+  if (shortcut(e, '-')) return stepZoom(-1);
+  if (shortcut(e, '0')) return setZoom(100);
   if ((shortcut(e, 'c') || shortcut(e, 'x')) && selected) navigator.clipboard.writeText(selected).catch(() => {});
   key(e, true);
 });
