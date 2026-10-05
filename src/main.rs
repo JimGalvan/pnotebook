@@ -192,14 +192,6 @@ async fn main() {
     });
     let _ = std::fs::create_dir_all(data_dir().join("chrome-profile"));
 
-    // Virtual display for the headful Chrome.
-    let _xvfb = tokio::process::Command::new("Xvfb")
-        .args([":99", "-screen", "0", "1920x1080x24", "-nolisten", "tcp"])
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| eprintln!("could not start Xvfb: {e}"))
-        .ok();
-
     let bookmarks = std::fs::read(data_dir().join("bookmarks.json"))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
@@ -361,7 +353,7 @@ async fn client(app: Arc<App>, socket: WebSocket) {
     let _ = tx.send(Message::Text(r#"{"t":"status","msg":"Loading…"}"#.into())).await;
     if let Err(e) = app.ensure_chrome().await {
         eprintln!("{e}");
-        let msg = serde_json::json!({"t": "status", "msg": e}).to_string();
+        let msg = serde_json::json!({"t": "error", "msg": e}).to_string();
         let _ = tx.send(Message::Text(msg.into())).await;
     } else {
         let mut frames = app.frames.subscribe();

@@ -17,10 +17,14 @@ use tokio::time::{Instant, sleep, sleep_until, timeout};
 use crate::{App, Tab, Viewport, data_dir};
 
 const CHROME: &str = "/usr/bin/chromium";
+const DISPLAY: &str = ":99";
+const X_LOCK: &str = "/tmp/.X99-lock";
+const X_SOCKET: &str = "/tmp/.X11-unix/X99";
 const FRAME_INTERVAL: Duration = Duration::from_millis(33); // ~30 fps cap
 
 pub struct Chrome {
     browser: Browser,
+    xvfb: tokio::process::Child,
     pub dead: Arc<AtomicBool>,
     handler: JoinHandle<()>,
     poll: Option<JoinHandle<()>>,
@@ -38,6 +42,7 @@ impl Chrome {
             let _ = std::fs::remove_file(profile.join(f));
         }
 
+        let xvfb = start_xvfb().await?;
         let config = BrowserConfig::builder()
             .chrome_executable(CHROME)
             .with_head() // headful on Xvfb: looks like a normal desktop Chrome to sites
@@ -47,7 +52,7 @@ impl Chrome {
             .viewport(None)
             .window_size(1920, 1080)
             .user_data_dir(&profile)
-            .env("DISPLAY", ":99")
+            .env("DISPLAY", DISPLAY)
             .args([
                 "--no-first-run",
                 "--no-default-browser-check",
@@ -75,6 +80,7 @@ impl Chrome {
 
         let mut chrome = Chrome {
             browser,
+            xvfb,
             dead,
             handler,
             poll: None,
@@ -300,5 +306,25 @@ impl Chrome {
             let _ = self.browser.kill().await;
         }
         self.handler.abort();
+        let _ = self.xvfb.kill().await;
     }
+}
+
+/// Starts the virtual display Chrome draws on. A container woken from sleep
+/// keeps /tmp, so a lock left by the previous run is removed first.
+async fn start_xvfb() -> Result<tokio::process::Child, String> {
+    let _ = std::fs::remove_file(X_LOCK);
+    let _ = std::fs::remove_file(X_SOCKET);
+    let child = tokio::process::Command::new("Xvfb")
+        .args([DISPLAY, "-screen", "0", "1920x1080x24", "-nolisten", "tcp"])
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("could not start Xvfb: {e}"))?;
+    for _ in 0..50 {
+        if std::path::Path::new(X_SOCKET).exists() {
+            return Ok(child);
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    Err("Xvfb did not start".into())
 }

@@ -60,7 +60,7 @@
 <script>
 const $ = id => document.getElementById(id);
 const canvas = $('screen'), ctx = canvas.getContext('2d'), view = $('view'), msg = $('msg'), url = $('url');
-let ws, state = { tabs: [], bookmarks: [] }, replaced = false;
+let ws, state = { tabs: [], bookmarks: [] }, replaced = false, failed = null;
 let selected = '';   // text selected in the remote page, kept ready for Ctrl+C
 let editing = null;  // url of the bookmark being renamed
 const ZOOMS = [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200];
@@ -85,6 +85,7 @@ function connect() {
     if (m.t === 'state') { state = m; render(); }
     else if (m.t === 'sel') selected = m.text;
     else if (m.t === 'status') status(m.msg);
+    else if (m.t === 'error') failed = m.msg;
     else if (m.t === 'replaced') {
       replaced = true;
       status('This session is open in another window.');
@@ -95,6 +96,13 @@ function connect() {
   };
   ws.onclose = () => {
     if (replaced) return;
+    if (failed) {
+      status('Could not start: ' + failed);
+      const b = el('button', null, 'Retry');
+      b.onclick = () => location.reload();
+      msg.append(b);
+      return;
+    }
     status('Disconnected. Reconnecting…');
     setTimeout(() => location.reload(), 2000);
   };
