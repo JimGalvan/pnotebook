@@ -13,7 +13,8 @@ use axum::routing::{get, post};
 use axum::{Form, Router};
 use bytes::Bytes;
 use chromiumoxide::cdp::browser_protocol::input::{
-    DispatchKeyEventParams, DispatchMouseEventParams, InsertTextParams,
+    DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams, DispatchMouseEventType,
+    InsertTextParams,
 };
 use chromiumoxide::cdp::browser_protocol::page::{NavigateParams, ReloadParams};
 use chrono::Timelike;
@@ -57,6 +58,7 @@ pub struct App {
     chrome: tokio::sync::Mutex<Option<Chrome>>,
     frames: watch::Sender<Bytes>,
     ui_json: watch::Sender<String>,
+    selection: watch::Sender<String>,
     ui: Mutex<Ui>,
     clients: AtomicUsize,
     last_seen: Mutex<Instant>,
@@ -192,6 +194,7 @@ async fn main() {
         chrome: tokio::sync::Mutex::new(None),
         frames: watch::Sender::new(Bytes::new()),
         ui_json: watch::Sender::new(String::new()),
+        selection: watch::Sender::new(String::new()),
         ui: Mutex::new(Ui { bookmarks, ..Default::default() }),
         clients: AtomicUsize::new(0),
         last_seen: Mutex::new(Instant::now()),
@@ -345,6 +348,7 @@ async fn client(app: Arc<App>, socket: WebSocket) {
     } else {
         let mut frames = app.frames.subscribe();
         let mut ui = app.ui_json.subscribe();
+        let mut selection = app.selection.subscribe();
         frames.mark_changed();
         ui.mark_changed();
 
@@ -359,6 +363,12 @@ async fn client(app: Arc<App>, socket: WebSocket) {
                     r = ui.changed() => {
                         if r.is_err() { break; }
                         let json = ui.borrow_and_update().clone();
+                        if tx.send(Message::Text(json.into())).await.is_err() { break; }
+                    }
+                    r = selection.changed() => {
+                        if r.is_err() { break; }
+                        let text = selection.borrow_and_update().clone();
+                        let json = serde_json::json!({"t": "sel", "text": text}).to_string();
                         if tx.send(Message::Text(json.into())).await.is_err() { break; }
                     }
                     _ = gen_rx.changed() => {
@@ -410,6 +420,33 @@ enum Cmd {
     TabClose { id: String },
     BmAdd,
     BmDel { url: String },
+    BmRename { url: String, title: String },
+}
+
+/// Text currently selected in the page, including inside text fields and
+/// same-origin iframes. Password fields are never read.
+const SELECTION_JS: &str = r#"(() => {
+  let doc = document, el = doc.activeElement;
+  while (el && el.tagName === 'IFRAME' && el.contentDocument) { doc = el.contentDocument; el = doc.activeElement; }
+  if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')) {
+    if (el.type === 'password' || el.selectionStart == null) return '';
+    return el.value.substring(el.selectionStart, el.selectionEnd);
+  }
+  return String(doc.getSelection() || '');
+})()"#;
+
+/// Sends the page's selected text to the client so Ctrl+C can copy it locally.
+fn publish_selection(app: &Arc<App>, page: chromiumoxide::Page) {
+    let app = app.clone();
+    tokio::spawn(async move {
+        if let Ok(text) = page.evaluate(SELECTION_JS).await.and_then(|v| Ok(v.into_value::<String>()?)) {
+            app.selection.send_if_modified(|cur| {
+                let changed = *cur != text;
+                *cur = text;
+                changed
+            });
+        }
+    });
 }
 
 fn to_url(input: &str) -> String {
@@ -445,12 +482,20 @@ async fn handle(app: &Arc<App>, cmd: Cmd) {
         }
         Cmd::Mouse { p } => {
             if let Some(page) = app.active_page().await {
+                let released = p.r#type == DispatchMouseEventType::MouseReleased;
                 let _ = page.execute(p).await;
+                if released {
+                    publish_selection(app, page);
+                }
             }
         }
         Cmd::Key { p } => {
             if let Some(page) = app.active_page().await {
+                let released = p.r#type == DispatchKeyEventType::KeyUp;
                 let _ = page.execute(p).await;
+                if released {
+                    publish_selection(app, page);
+                }
             }
         }
         Cmd::Text { text } => {
@@ -511,6 +556,15 @@ async fn handle(app: &Arc<App>, cmd: Cmd) {
         Cmd::BmDel { url } => {
             app.ui.lock().unwrap().bookmarks.retain(|b| b.url != url);
             app.save_bookmarks();
+        }
+        Cmd::BmRename { url, title } => {
+            let title = title.trim();
+            if !title.is_empty() {
+                if let Some(b) = app.ui.lock().unwrap().bookmarks.iter_mut().find(|b| b.url == url) {
+                    b.title = title.to_string();
+                }
+                app.save_bookmarks();
+            }
         }
     }
 }

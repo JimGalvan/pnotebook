@@ -27,6 +27,7 @@
   .bm span { overflow: hidden; text-overflow: ellipsis; }
   .bm .x { display: none; }
   .bm:hover .x { display: inline; }
+  .bm-edit { width: 150px; background: var(--bg); color: var(--fg); border: 1px solid var(--accent); border-radius: 6px; padding: 0 4px; font: inherit; outline: none; }
   #view { flex: 1; position: relative; overflow: hidden; background: #fff; }
   canvas { position: absolute; top: 0; left: 0; outline: none; cursor: default; }
   #msg { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 12px; align-items: center; justify-content: center; background: var(--bg); color: var(--muted); font-size: 15px; }
@@ -54,6 +55,8 @@
 const $ = id => document.getElementById(id);
 const canvas = $('screen'), ctx = canvas.getContext('2d'), view = $('view'), msg = $('msg'), url = $('url');
 let ws, state = { tabs: [], bookmarks: [] }, replaced = false;
+let selected = '';   // text selected in the remote page, kept ready for Ctrl+C
+let editing = null;  // url of the bookmark being renamed
 
 const send = o => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -71,6 +74,7 @@ function connect() {
     if (typeof e.data !== 'string') return frame(e.data);
     const m = JSON.parse(e.data);
     if (m.t === 'state') { state = m; render(); }
+    else if (m.t === 'sel') selected = m.text;
     else if (m.t === 'status') status(m.msg);
     else if (m.t === 'replaced') {
       replaced = true;
@@ -112,9 +116,10 @@ function resize() {
 }
 new ResizeObserver(() => { clearTimeout(resizeTimer); resizeTimer = setTimeout(resize, 150); }).observe(view);
 
-// Mouse
+// Mouse. On a Mac, Cmd is sent as Ctrl since the remote Chrome runs on Linux.
+const MAC = /Mac|iPhone|iPad/.test(navigator.platform);
 const mods = e => (e.getModifierState && e.getModifierState('AltGraph')) ? 0 :
-  (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
+  (e.altKey ? 1 : 0) | (e.ctrlKey || (MAC && e.metaKey) ? 2 : 0) | (!MAC && e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
 const BUTTONS = ['left', 'middle', 'right', 'back', 'forward'];
 const held = b => b & 1 ? 'left' : b & 4 ? 'middle' : b & 2 ? 'right' : 'none';
 function pos(e) { const r = canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
@@ -151,8 +156,9 @@ canvas.addEventListener('wheel', e => {
 }, { passive: false });
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 
-// Keyboard. Ctrl+V is left to the local browser so the paste event below
-// can send the local clipboard text.
+// Keyboard. Ctrl+C/X also put the remote selection on the local clipboard,
+// and Ctrl+V is left to the local browser so the paste event below can send
+// the local clipboard text.
 function key(e, down) {
   if (e.key === 'Dead' || e.isComposing) return;
   const altGr = e.getModifierState && e.getModifierState('AltGraph');
@@ -167,13 +173,16 @@ function key(e, down) {
     autoRepeat: e.repeat, location: e.location,
   } });
 }
+const shortcut = (e, k) => (e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === k;
 canvas.addEventListener('keydown', e => {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') return;
-  e.preventDefault(); key(e, true);
+  if (shortcut(e, 'v')) return;
+  e.preventDefault();
+  if ((shortcut(e, 'c') || shortcut(e, 'x')) && selected) navigator.clipboard.writeText(selected).catch(() => {});
+  key(e, true);
 });
 canvas.addEventListener('keyup', e => { e.preventDefault(); key(e, false); });
 document.addEventListener('paste', e => {
-  if (document.activeElement === url) return;
+  if (document.activeElement !== canvas) return;
   e.preventDefault();
   const text = e.clipboardData.getData('text');
   if (text) send({ t: 'text', text });
@@ -219,17 +228,44 @@ function render() {
   const starred = tab && state.bookmarks.some(b => b.url === tab.url);
   $('star').innerHTML = starred ? '&#9733;' : '&#9734;';
 
+  if (editing) return;
   const bm = $('bm');
   bm.replaceChildren();
   for (const b of state.bookmarks) {
     const d = el('div', 'bm');
     d.title = b.url;
+    const edit = el('span', 'x', '✎');
+    edit.title = 'Rename';
+    edit.onclick = ev => { ev.stopPropagation(); rename(d, b); };
     const del = el('span', 'x', '✕');
+    del.title = 'Remove';
     del.onclick = ev => { ev.stopPropagation(); send({ t: 'bm_del', url: b.url }); };
     d.onclick = () => { send({ t: 'go', url: b.url }); canvas.focus(); };
-    d.append(el('span', null, b.title), del);
+    d.append(el('span', null, b.title), edit, del);
     bm.append(d);
   }
+}
+
+function rename(d, b) {
+  editing = b.url;
+  const input = el('input', 'bm-edit');
+  input.value = b.title;
+  d.onclick = null;
+  d.replaceChildren(input);
+  input.focus();
+  input.select();
+  const done = save => {
+    if (!editing) return;
+    editing = null;
+    const title = input.value.trim();
+    if (save && title && title !== b.title) send({ t: 'bm_rename', url: b.url, title });
+    render();
+  };
+  input.onkeydown = e => {
+    if (e.key === 'Enter') done(true);
+    if (e.key === 'Escape') done(false);
+  };
+  input.onblur = () => done(true);
 }
 
 connect();
