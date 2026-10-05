@@ -32,12 +32,22 @@
   canvas { position: absolute; top: 0; left: 0; outline: none; cursor: default; touch-action: none; }
   #zoom { font-size: 12px; min-width: 46px; padding: 6px 4px; color: var(--muted); }
   @media (hover: none) { .bm .x { display: inline; } }
-  @media (max-width: 600px) { #fwd { display: none; } .tab { width: 140px; } }
+  #kbBtn { display: none; }
+  @media (pointer: coarse) { #kbBtn { display: inline-block; } }
+  /* On phones the address bar gets its own row above the buttons. */
+  @media (max-width: 600px) {
+    #bar { flex-wrap: wrap; }
+    #url { order: -1; flex-basis: 100%; }
+    .tab { width: 140px; }
+  }
+  /* Off-screen text box that receives the phone keyboard's input. 16px avoids iOS zooming in on focus. */
+  #kb { position: fixed; top: 0; left: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; font-size: 16px; resize: none; }
   #msg { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 12px; align-items: center; justify-content: center; background: var(--bg); color: var(--muted); font-size: 15px; }
   #msg button { background: var(--accent); color: #fff; font-size: 14px; padding: 8px 14px; }
 </style>
 </head>
 <body>
+<textarea id="kb" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-hidden="true"></textarea>
 <div id="app">
   <div id="tabs"></div>
   <div id="bar">
@@ -49,6 +59,7 @@
     <button id="zoom" title="Reset zoom (Ctrl 0)">100%</button>
     <button id="zoomIn" title="Zoom in (Ctrl +)">+</button>
     <button id="star" title="Bookmark this page">&#9734;</button>
+    <button id="kbBtn" title="Keyboard">&#9000;</button>
     <form method="post" action="/logout" style="margin:0"><button title="Log out">&#9211;</button></form>
   </div>
   <div id="bm"></div>
@@ -230,7 +241,7 @@ canvas.addEventListener('touchend', e => {
   if (!touch) return;
   const t = e.changedTouches[0];
   if (!touch.moved) {
-    canvas.focus();
+    if (document.activeElement !== kb) canvas.focus();  // keep the phone keyboard open
     mouse('mouseMoved', t, { button: 'none' });
     mouse('mousePressed', t, { button: 'left', buttons: 1, clickCount: 1 });
     mouse('mouseReleased', t, { button: 'left', buttons: 0, clickCount: 1 });
@@ -368,6 +379,37 @@ function rename(d, b) {
   };
   input.onblur = () => done(true);
 }
+
+// Phone keyboard. Mobile keyboards don't send usable key events, so typing
+// goes into a hidden text box and each change is diffed: removed characters
+// become Backspace, added ones are inserted, a new line becomes Enter. The box
+// always starts with a marker character so Backspace works when it's "empty".
+const kb = $('kb'), MARK = '\u200b';
+let kbText = MARK;
+function press(key, code, keyCode, text) {
+  send({ t: 'key', p: { type: text ? 'keyDown' : 'rawKeyDown', key, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode, text, unmodifiedText: text } });
+  send({ t: 'key', p: { type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode } });
+}
+function resetKb() { kb.value = kbText = MARK; kb.setSelectionRange(1, 1); }
+kb.addEventListener('input', () => {
+  const now = kb.value;
+  let i = 0;
+  while (i < kbText.length && i < now.length && kbText[i] === now[i]) i++;
+  for (let n = kbText.length - i; n > 0; n--) press('Backspace', 'Backspace', 8);
+  const parts = now.slice(i).replace(MARK, '').split('\n');
+  parts.forEach((part, j) => {
+    if (j > 0) press('Enter', 'Enter', 13, '\r');
+    if (part) send({ t: 'text', text: part });
+  });
+  kbText = now;
+  if (parts.length > 1 || !now.startsWith(MARK) || now.length > 200) resetKb();
+});
+kb.addEventListener('focus', resetKb);
+const kbBtn = $('kbBtn');
+let kbWasOpen = false;
+kbBtn.addEventListener('mousedown', e => e.preventDefault());  // don't steal focus from the text box
+kbBtn.addEventListener('pointerdown', () => { kbWasOpen = document.activeElement === kb; });
+kbBtn.addEventListener('click', () => { if (kbWasOpen) kb.blur(); else kb.focus(); });
 
 connect();
 canvas.focus();
